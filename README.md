@@ -4,7 +4,7 @@ A hosted HTTP API that accepts a LinkedIn profile URL and returns structured
 JSON: name, headline, location, about, experience, education, skills,
 certifications, languages, and profile images.
 
-**Live URL:** `<fill in after deploying — see Deployment section>`
+**Live URL:** `https://linkedin-profile-api-5ufz.onrender.com`
 **Health check:** `GET /healthz`
 
 ---
