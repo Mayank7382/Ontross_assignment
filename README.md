@@ -1,338 +1,382 @@
-# EzeeChatBot API
+# LinkedIn Profile API
 
-A production-ready Retrieval-Augmented Generation (RAG) chatbot backend. Upload any document — plain text or a URL — and instantly get a grounded chatbot that answers questions exclusively from that content.
+A hosted HTTP API that accepts a LinkedIn profile URL and returns structured
+JSON: name, headline, location, about, experience, education, skills,
+certifications, languages, and profile images.
+
+**Live URL:** `<fill in after deploying — see Deployment section>`
+**Health check:** `GET /healthz`
 
 ---
 
-## Quick Start
+## Important note on approach (read this first)
 
-### 1. Prerequisites
+This service is built around a **provider abstraction** rather than a direct
+scraper against LinkedIn's private/internal endpoints. The active
+implementation, `MockProfileProvider`, returns realistic, schema-complete
+fixture data for a small set of demo profiles.
 
-- Python 3.11+
-- An Anthropic API key (optional — the system runs in demo mode without one)
-- Optionally, an OpenAI API key for neural embeddings (falls back to TF-IDF without one)
+This was a deliberate engineering decision, not a shortcut:
 
-### 2. Install
+- LinkedIn's User Agreement prohibits scraping or accessing the platform
+  through automated means outside of their official channels, and LinkedIn
+  has actively pursued legal action against companies and individuals doing
+  this (this is well-documented litigation, not a hypothetical risk).
+- Building and hosting a public tool that authenticates as a real account and
+  hits LinkedIn's internal (non-public) endpoints to bulk-extract profile
+  data creates real legal and account-level exposure for whoever runs it,
+  regardless of framing (personal project, take-home assignment, etc.) or
+  which credentials are used.
+- The correct way to get LinkedIn profile data programmatically and legally
+  is LinkedIn's official **Partner Program APIs**, which require a signed
+  partnership agreement and OAuth, or a licensed third-party data vendor with
+  its own compliant agreement with LinkedIn.
 
+Every other part of this system — HTTP API design, request validation,
+auth, rate limiting, response schema, error handling, testing, deployment —
+is built exactly as it would be for a production service. The **only**
+component that differs from a "real" version is the data source, and the
+codebase is structured (see [Architecture](#architecture)) so that swapping
+in a real, compliant data source is a one-file change with zero impact on
+the rest of the API.
+
+If your evaluation specifically requires a direct-scraping implementation
+against LinkedIn's endpoints, this repo intentionally does not provide
+that — happy to discuss the reasoning further.
+
+---
+
+## How to test this live deployment
+
+**Live base URL:** `https://linkedin-profile-api-5ufz.onrender.com`
+**Test API key:** `prod-key-abc123` (set via the `API_KEYS` environment variable on Render, for evaluation purposes only)
+
+> Note: this runs on Render's free tier, which spins down after inactivity. The **first** request after a period of idleness can take 30–50 seconds to respond while the instance wakes up — this is expected, not a bug. Subsequent requests are fast.
+
+**1. Health check** (open directly in a browser):
+```
+https://linkedin-profile-api-5ufz.onrender.com/healthz
+```
+Expected: `{"status":"ok","uptimeSeconds":...}`
+
+**2. Fetch a profile** (requires a POST request — use curl, Postman, or similar):
 ```bash
-git clone https://github.com/your-org/ezeechatbot
-cd ezeechatbot
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+curl -X POST https://linkedin-profile-api-5ufz.onrender.com/v1/profile \
+  -H "Authorization: Bearer prod-key-abc123" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.linkedin.com/in/mayank-gupta-ab5337197/"}'
 ```
 
-### 3. Configure
+Three profile URLs are seeded with fixture data and will return full structured JSON:
+- `https://www.linkedin.com/in/mayank-gupta-ab5337197/` — my own profile, full data
+- `https://www.linkedin.com/in/jane-doe-1234a5/` — demo profile, all fields populated
+- `https://www.linkedin.com/in/arjun-mehta-9b8c7d/` — demo profile, several fields intentionally null (shows graceful handling of missing data)
+
+Any other LinkedIn URL will correctly return `404 PROFILE_NOT_FOUND` — that's expected, not an error in the deployment. Visiting the bare base URL (`/`) in a browser will also correctly return a `404 NOT_FOUND`, since only `/healthz` and `/v1/profile` are defined routes.
+
+---
+
+## Table of contents
+
+- [Quick start](#quick-start)
+- [Architecture](#architecture)
+- [API documentation](#api-documentation)
+- [Configuration](#configuration)
+- [Testing](#testing)
+- [Deployment](#deployment)
+- [Known limitations](#known-limitations)
+- [Possible next steps](#possible-next-steps)
+
+---
+
+## Quick start
+
+### Prerequisites
+
+- Node.js 18+ and npm
+- (Optional) Docker, if you want to run it containerized
+
+### Local setup
 
 ```bash
+git clone <your-repo-url>
+cd linkedin-profile-api
+npm install
 cp .env.example .env
-# Edit .env and add your keys
+# Edit .env and set API_KEYS to something of your choosing, e.g.:
+#   API_KEYS=dev-key-abc123
+npm run dev
 ```
 
-`.env.example`:
-```
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...          # optional, for neural embeddings
-```
+The server starts on `http://localhost:3000` by default.
 
-### 4. Run
+### Try it
 
 ```bash
-uvicorn app.main:app --reload --port 8000
-```
-
-API docs available at: [http://localhost:8000/docs](http://localhost:8000/docs)
-
----
-
-## API Reference
-
-### `POST /upload/text`
-
-Index plain text or Markdown content.
-
-```bash
-curl -X POST http://localhost:8000/upload/text \
+curl -X POST http://localhost:3000/v1/profile \
+  -H "Authorization: Bearer dev-key-abc123" \
   -H "Content-Type: application/json" \
-  -d '{
-    "content": "Acme Corp was founded in 1998 by Jane Doe...",
-    "source_name": "acme_overview"
-  }'
+  -d '{"url": "https://www.linkedin.com/in/jane-doe-1234a5/"}'
 ```
 
-**Response:**
-```json
-{
-  "bot_id": "bot_a3f9c12d84",
-  "source": "acme_overview",
-  "chunks_indexed": 12,
-  "message": "Knowledge base ready. Use bot_id 'bot_a3f9c12d84' to start chatting."
-}
-```
+Two demo profiles are seeded in `src/data/mock-profiles.ts`:
+- `https://www.linkedin.com/in/jane-doe-1234a5/` — full profile, all fields populated
+- `https://www.linkedin.com/in/arjun-mehta-9b8c7d/` — partial profile, several fields null/empty (demonstrates graceful handling of missing data)
 
----
-
-### `POST /upload/url`
-
-Fetch a URL, extract readable text, and index it.
-
-```bash
-curl -X POST http://localhost:8000/upload/url \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://en.wikipedia.org/wiki/Retrieval-augmented_generation"}'
-```
-
----
-
-### `POST /chat`
-
-Ask a question grounded in the uploaded knowledge base.
-
-```bash
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "bot_id": "bot_a3f9c12d84",
-    "user_message": "When was Acme Corp founded?",
-    "conversation_history": []
-  }'
-```
-
-**Response:**
-```json
-{
-  "bot_id": "bot_a3f9c12d84",
-  "response": "Acme Corp was founded in 1998 by Jane Doe.",
-  "grounded": true,
-  "sources_used": 3,
-  "latency_ms": 843.2
-}
-```
-
-**Out-of-scope question (hallucination guard):**
-```json
-{
-  "response": "I'm sorry, I couldn't find that information in the provided document.",
-  "grounded": false,
-  "sources_used": 0
-}
-```
-
----
-
-### `POST /chat/stream`
-
-Same as `/chat` but returns a Server-Sent Events stream for real-time display.
-
-```javascript
-const response = await fetch('http://localhost:8000/chat/stream', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ bot_id, user_message, conversation_history })
-});
-
-const reader = response.body.getReader();
-const decoder = new TextDecoder();
-
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
-  const lines = decoder.decode(value).split('\n');
-  for (const line of lines) {
-    if (line.startsWith('data: ')) {
-      const data = line.slice(6);
-      if (data === '[DONE]') break;
-      try {
-        const parsed = JSON.parse(data);
-        if (parsed.type === 'meta') {
-          console.log('Meta:', parsed); // latency, cost, grounded flag
-        }
-      } catch {
-        process.stdout.write(data); // plain text delta
-      }
-    }
-  }
-}
-```
-
----
-
-### `GET /stats/{bot_id}`
-
-Operational metrics for a bot.
-
-```bash
-curl http://localhost:8000/stats/bot_a3f9c12d84
-```
-
-**Response:**
-```json
-{
-  "bot_id": "bot_a3f9c12d84",
-  "total_messages": 47,
-  "avg_latency_ms": 912.4,
-  "estimated_cost_usd": 0.00284,
-  "unanswered_questions": 3,
-  "chunks_in_store": 18,
-  "created_at": "2025-01-15T10:32:00Z"
-}
-```
+Any other LinkedIn URL will return a `404 PROFILE_NOT_FOUND`.
 
 ---
 
 ## Architecture
 
 ```
-POST /upload/text or /upload/url
-        │
-        ▼
-  [fetcher.py]          (URL → clean text)
-        │
-        ▼
-  [chunker.py]          (text → semantic chunks)
-        │
-        ▼
-  [vector_store.py]     (chunks → embeddings → stored by bot_id)
-        │
-        └──→ returns bot_id
-
-POST /chat
-        │
-        ▼
-  [vector_store.py]     (query → cosine similarity → top-k chunks)
-        │
-        ▼
-  [llm.py]              (chunks + history → grounded system prompt → LLM)
-        │
-        ▼
-  [stats.py]            (record latency, tokens, unanswered flag)
-        │
-        ▼
-  ChatResponse / SSE stream
+src/
+├── server.ts                  # process entrypoint
+├── app.ts                     # express app assembly (middleware + routes)
+├── routes/
+│   ├── profile.routes.ts      # POST /v1/profile
+│   └── health.routes.ts       # GET /healthz
+├── services/
+│   └── profile.service.ts     # orchestration + response validation
+├── providers/
+│   ├── profile-provider.interface.ts   # the swappable contract
+│   ├── mock-profile-provider.ts        # current implementation
+│   └── index.ts                        # single wiring point
+├── data/
+│   └── mock-profiles.ts       # fixture data (fabricated, not real people)
+├── schemas/
+│   └── profile.schema.ts      # Zod schemas = request/response contract
+├── middleware/
+│   ├── auth.ts                # API key check
+│   └── rate-limit.ts          # per-key rate limiting
+└── utils/
+    ├── errors.ts               # consistent error envelope + request IDs
+    └── logger.ts                # structured logging (pino)
 ```
 
-### Multi-bot isolation
+**Why a provider interface?** `ProfileProvider` (in
+`src/providers/profile-provider.interface.ts`) defines one method,
+`getProfileByUrl(url) => Promise<ProfileResponse>`. Everything above that
+line — routing, auth, rate limiting, validation, error handling — has zero
+knowledge of *how* the data is obtained. Today `getProfileProvider()` returns
+a `MockProfileProvider`. A production deployment would add a
+`PartnerApiProfileProvider` implementing the same interface against
+LinkedIn's official API, or against a licensed vendor, and change one line in
+`src/providers/index.ts`. This is the same pattern you'd use for a payments
+provider, an email provider, or any external dependency you expect to swap
+or mock — it's not scraping-specific.
 
-Each `POST /upload` creates a new `bot_id` backed by its own `BotStore` (independent chunk list + embedding matrix). Retrieval is always scoped to a single `bot_id` — there is no shared index and no cross-contamination between clients.
+**Why validate the response with Zod, not just the request?** The schema in
+`profile.schema.ts` is asserted against on the way *out* of
+`profile.service.ts`, not just the way in. This means if a future provider
+implementation returns malformed or unexpected data, the service fails
+loudly with a 500 rather than silently shipping bad data to a client.
 
 ---
 
-## Chunking Strategy — Rationale
+## API documentation
 
-### The problem with naive splitting
+### Authentication
 
-Splitting on every N characters is simple to implement but produces low-quality embeddings because:
-
-1. **Broken sentences** — a chunk can begin mid-sentence, so the embedding represents a fragment without grammatical or semantic context.
-2. **Broken concepts** — an argument or explanation that spans two sentences gets silently truncated at the chunk boundary, making the full answer unretrievable.
-3. **No overlap** — a question whose answer straddles two chunks returns neither.
-
-### Our approach: sliding-window sentence chunking
+All endpoints except `/healthz` require an API key:
 
 ```
-sentences = split_on_sentence_boundaries(text)
-chunks    = sliding_window(sentences, size=5, overlap=1)
+Authorization: Bearer <your-api-key>
 ```
 
-**Step 1 — Sentence boundary detection**  
-We split on punctuation (`.`, `!`, `?`) followed by a capital letter, with special handling for paragraph breaks (`\n\n`) as natural topic boundaries. This avoids splitting after common abbreviations (`Mr.`, `U.S.A.`).
+Keys are configured via the `API_KEYS` environment variable (comma-separated
+for multiple keys). There is no user database — this is a single-tenant,
+key-based scheme appropriate for a demo/portfolio service.
 
-**Step 2 — Sliding window with overlap**  
-We advance the window by `chunk_size − overlap` sentences at a time. The overlapping sentence ensures that answers spanning two adjacent chunks are retrievable from at least one of them.
+### `POST /v1/profile`
 
-**Step 3 — Metadata preservation**  
-Each chunk stores its source name, original character offsets, and sentence window indices. This enables future citation, provenance tracking, and chunk-level debugging without re-parsing the original document.
+**Request body**
 
-**Why 5 sentences / 1 sentence overlap?**  
-5 sentences is roughly 100–150 words — long enough to carry a complete thought, short enough that the embedding is focused rather than a diffuse average of unrelated facts. 1-sentence overlap is minimal but sufficient for the retrieval patterns we see in Q&A tasks.
+```json
+{
+  "url": "https://www.linkedin.com/in/jane-doe-1234a5/"
+}
+```
 
-**Trade-offs accepted:**  
-This approach is ~3× more expensive to index than character splits (more chunks, more embedding calls) but produces meaningfully better retrieval precision. For production at scale, sentence chunking + neural embeddings is the industry standard for a reason.
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `url` | string | yes | Must be an absolute URL on a `linkedin.com` host, containing `/in/<identifier>` |
+
+**Success response — `200 OK`**
+
+```json
+{
+  "requestedUrl": "https://www.linkedin.com/in/jane-doe-1234a5/",
+  "publicIdentifier": "jane-doe-1234a5",
+  "name": "Jane Doe",
+  "headline": "Senior Software Engineer at Acme Corp | Distributed Systems",
+  "location": "Bengaluru, Karnataka, India",
+  "about": "Backend engineer with 8+ years building high-throughput distributed systems...",
+  "experience": [
+    {
+      "title": "Senior Software Engineer",
+      "company": "Acme Corp",
+      "companyLogoUrl": "https://example.com/logos/acme.png",
+      "employmentType": "Full-time",
+      "location": "Bengaluru, Karnataka, India",
+      "startDate": "2022-03",
+      "endDate": null,
+      "isCurrent": true,
+      "description": "Leading the platform reliability team..."
+    }
+  ],
+  "education": [
+    {
+      "school": "National Institute of Technology",
+      "schoolLogoUrl": "https://example.com/logos/nit.png",
+      "degree": "Bachelor of Technology",
+      "fieldOfStudy": "Computer Science",
+      "startYear": 2015,
+      "endYear": 2019,
+      "activities": "ACM student chapter, competitive programming club"
+    }
+  ],
+  "skills": [
+    { "name": "Distributed Systems", "endorsementCount": 42 }
+  ],
+  "certifications": [
+    {
+      "name": "AWS Certified Solutions Architect – Associate",
+      "issuingOrganization": "Amazon Web Services",
+      "issueDate": "2023-01",
+      "expirationDate": "2026-01",
+      "credentialId": "AWS-SAA-000000",
+      "credentialUrl": "https://example.com/verify/aws-saa-000000"
+    }
+  ],
+  "languages": [
+    { "name": "English", "proficiency": "Full professional proficiency" }
+  ],
+  "images": {
+    "profilePictureUrl": "https://example.com/avatars/jane-doe.jpg",
+    "backgroundImageUrl": "https://example.com/backgrounds/jane-doe.jpg"
+  },
+  "meta": {
+    "source": "mock-provider",
+    "fetchedAt": "2026-08-28T10:15:00.000Z",
+    "isPartialData": false
+  }
+}
+```
+
+Every field that can legitimately be absent on a real profile (`about`,
+`companyLogoUrl`, `endorsementCount`, etc.) is typed as nullable rather than
+omitted, so consumers can rely on a stable shape.
+
+**Error responses**
+
+All errors share one envelope:
+
+```json
+{
+  "error": {
+    "code": "PROFILE_NOT_FOUND",
+    "message": "No profile data available for identifier \"nobody-here\"",
+    "requestId": "aB3xQ9zK1m"
+  }
+}
+```
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `INVALID_REQUEST` | Body fails schema validation (missing/malformed `url`) |
+| 400 | `INVALID_PROFILE_URL` | URL is a linkedin.com URL but has no parseable `/in/<id>` segment |
+| 401 | `UNAUTHORIZED` | Missing/invalid API key |
+| 404 | `PROFILE_NOT_FOUND` | Well-formed URL, no data available for that identifier |
+| 429 | `RATE_LIMITED` | Too many requests from this key/IP in the current window |
+| 500 | `INTERNAL_ERROR` | Unexpected server-side failure |
+
+### `GET /healthz`
+
+No auth required. Returns `{ "status": "ok", "uptimeSeconds": <number> }`.
+Used by the hosting platform's health checks.
 
 ---
 
-## Hallucination Handling
+## Configuration
 
-The system prompt explicitly instructs the model:
+All configuration is via environment variables — see `.env.example` for the
+full list with defaults and comments. Key ones:
 
-> "If the answer is not in the `<context>`, respond with exactly: 'I'm sorry, I couldn't find that information in the provided document.' Do not fabricate facts."
+| Variable | Purpose |
+|---|---|
+| `API_KEYS` | Comma-separated valid API keys |
+| `PORT` | Port to listen on |
+| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` | Rate limiting window/threshold |
+| `PROFILE_PROVIDER` | Which provider implementation to use (currently only `mock`) |
 
-We then check the response for this sentinel prefix programmatically (`is_unanswered()`). This approach has two advantages over post-hoc classification:
-
-1. **No extra LLM call** — the detection is free (a string prefix check).
-2. **Reliable signal** — the model is instructed to produce a canonical phrase, not a free-form expression of uncertainty, so we don't miss paraphrased refusals.
-
-Unanswered questions are counted separately in `/stats` so product teams can identify knowledge-base gaps over time.
+**No secrets are committed to this repository.** `.env` is gitignored;
+`.env.example` contains only placeholder values.
 
 ---
 
-## Running Tests
+## Testing
 
 ```bash
-pytest tests/ -v
+npm test
 ```
 
-Tests cover:
-- Sentence splitter correctness (abbreviations, paragraphs)
-- Chunk overlap and metadata integrity
-- Hallucination sentinel detection
-- Stats isolation between bots
+Tests use Vitest + Supertest and cover: auth rejection, request validation,
+not-found handling, and the full happy-path response shape. See
+`src/routes/profile.routes.test.ts`.
 
 ---
 
-## Project Structure
+## Deployment
 
+This repo includes a multi-stage `Dockerfile` and a `render.yaml` for
+one-click deployment to [Render](https://render.com), but any platform that
+runs a Docker container or a plain Node process (Fly.io, Railway, a VPS,
+etc.) works.
+
+### Deploy to Render
+
+1. Push this repo to GitHub.
+2. In Render, choose **New → Blueprint**, point it at the repo — `render.yaml` configures the service automatically.
+3. Set the `API_KEYS` environment variable in the Render dashboard (marked `sync: false` in `render.yaml` so it's not stored in the repo/blueprint).
+4. Deploy. Render provides HTTPS automatically on the `*.onrender.com` domain.
+
+### Deploy anywhere else with Docker
+
+```bash
+docker build -t linkedin-profile-api .
+docker run -p 3000:3000 --env-file .env linkedin-profile-api
 ```
-ezeechatbot/
-├── app/
-│   ├── main.py                  # FastAPI app, CORS, lifespan
-│   ├── models/
-│   │   └── schemas.py           # Pydantic request/response models
-│   ├── routers/
-│   │   ├── upload.py            # POST /upload/text, POST /upload/url
-│   │   ├── chat.py              # POST /chat, POST /chat/stream
-│   │   └── stats.py             # GET /stats/{bot_id}
-│   ├── services/
-│   │   ├── chunker.py           # Semantic chunking logic
-│   │   ├── vector_store.py      # In-memory embeddings + cosine retrieval
-│   │   ├── llm.py               # Prompt building, streaming, cost estimation
-│   │   └── stats.py             # Per-bot metrics tracking
-│   └── utils/
-│       └── fetcher.py           # URL fetching + HTML text extraction
-├── tests/
-│   └── test_core.py             # Unit tests for all core services
-├── requirements.txt
-└── README.md
-```
+
+Put this behind any HTTPS-terminating reverse proxy or platform load
+balancer (the app itself serves plain HTTP; TLS termination is expected to
+happen at the platform/proxy layer, which is standard practice).
 
 ---
 
-## What I Would Do Differently With More Time
+## Known limitations
 
-**1. Persistent storage**  
-The current implementation is entirely in-memory — all bots and their embeddings are lost on restart. The natural next step is:
-- Embeddings → [Qdrant](https://qdrant.tech/) or [Chroma](https://www.trychroma.com/) (both have excellent local-first modes)
-- Stats → PostgreSQL or Redis with TTL
-- The `VectorStore` interface is already designed to be swappable: `add_chunks()` and `retrieve()` are the only two methods a persistent backend needs to implement.
+- **Data source is a small fixture set, not live LinkedIn data.** See the
+  note at the top of this README for why, and see
+  `src/providers/profile-provider.interface.ts` for exactly where a
+  compliant real data source would be wired in.
+- **No pagination** on list fields (experience, education, etc.) — profiles
+  with very long histories return everything in one response. For a real
+  provider backed by a paginated upstream API, this would need to change.
+- **Single-tenant API key auth**, not OAuth or per-user scoping. Fine for a
+  demo; not what you'd want for a multi-customer product.
+- **No caching layer.** A real provider (partner API or licensed vendor)
+  would likely have its own rate limits, so a caching layer (Redis, etc.)
+  in front of `profile.service.ts` would be a near-term addition.
+- **No persistent storage.** Nothing is written to a database; every request
+  is resolved fresh from the provider.
 
-**2. Smarter chunking for structured documents**  
-PDFs and HTML pages often have natural structure (headings, sections, tables) that our sentence splitter ignores. With more time I'd add a document-type-aware pre-pass:
-- Markdown → split on `##` headings
-- HTML → extract `<article>`, `<section>`, `<h1–h6>` boundaries before sentence-splitting
-- PDF → use `pdfminer` to detect column layout and reading order
+## Possible next steps
 
-**3. Re-ranking**  
-After cosine retrieval, a cross-encoder re-ranker (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`) scores each chunk against the query more accurately than embedding similarity. This step is cheap (local model, no API call) and measurably improves retrieval precision. It would slot in as a post-processing step in `vector_store.retrieve()`.
-
-**4. Authentication & rate limiting**  
-Each `bot_id` is currently a public resource. In production, `bot_id` creation should require an API key, and `/chat` should be rate-limited per-key to prevent abuse and runaway LLM costs.
-
----
-
-## Cost Reference
-
-| Model | Input (per 1M tokens) | Output (per 1M tokens) |
-|---|---|---|
-| claude-opus-4 | $15.00 | $75.00 |
-| text-embedding-3-small | $0.02 | — |
-
-A typical Q&A exchange (5 chunks × 100 words context + 50-word answer) costs approximately **$0.0003** per message at claude-opus-4 pricing.
+- Implement `PartnerApiProfileProvider` against LinkedIn's official Partner
+  API once/if partner access is available, or against a licensed
+  data-as-a-service vendor.
+- Add a caching layer with configurable TTL per field group (e.g. images
+  cached longer than experience).
+- Add OpenAPI/Swagger generation directly from the Zod schemas.
+- Add per-key usage metrics/dashboards.
